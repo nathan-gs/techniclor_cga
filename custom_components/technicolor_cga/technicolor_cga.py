@@ -15,6 +15,8 @@ class TechnicolorCGA:
         # (the modem only allows one session at a time).
         self._levels_cache = None
         self._levels_ts = 0.0
+        self._iface_cache = None
+        self._iface_ts = 0.0
 
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36"})
@@ -120,6 +122,18 @@ class TechnicolorCGA:
         data = self.call(endpoint)
         self._levels_cache = data
         self._levels_ts = time.time()
+        return data
+
+    def interfaces(self, max_age=10):
+        # WAN/LAN/WiFi interface statistics (dig_interface). Cached like
+        # levels() so the WAN/LAN sensors share one request per update pass.
+        if self._iface_cache is not None and (time.time() - self._iface_ts) < max_age:
+            return self._iface_cache
+
+        endpoint = self.endpoint("dig_interface", [])
+        data = self.call(endpoint)
+        self._iface_cache = data
+        self._iface_ts = time.time()
         return data
 
     def dhcp(self):

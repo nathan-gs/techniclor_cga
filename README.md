@@ -5,6 +5,7 @@ This project provides several **sensor entities** for a Technicolor CGA gateway 
 
 - **System status** (e.g., `CMStatus`) including pass-through of additional system attributes
 - **DOCSIS RF sensors**: downstream/upstream power, downstream SNR, and corrected/uncorrectable codeword counters (from the `levels()` tables)
+- **WAN / LAN interface sensors**: WAN link status, WAN packet/byte/error counters, and a LAN-ports summary (from `dig_interface()`)
 - **DHCP sensors** for all DHCP keys returned by the gateway
 - **Host list** with the number of currently detected devices (`hostTbl`)
 - **Missing devices / Delta sensor**: shows devices that disappeared or are inactive
@@ -57,6 +58,21 @@ cached fetch feeds all of them.
 - **Downstream Correcteds** — total corrected codewords (`total_increasing`, diagnostic).
 - **Downstream Uncorrectables** — total uncorrectable codewords (`total_increasing`, diagnostic). The key line-health metric — it should stay flat.
 - **DOCSIS Channels** — number of locked channels; attributes carry the raw `DSTbl`/`USTbl`/`exDSTbl`/`exUSTbl`/`ErrTbl` tables for drill-down.
+
+### WAN / LAN interface sensors
+Derived from `dig_interface()` (WAN uplink, physical LAN ports and WiFi radios).
+One shared, briefly cached fetch feeds all of them.
+
+- **WAN Status** — WAN link state (`Up`/`Down`); attributes carry link speed, duplex and all WAN counters.
+- **WAN Packets Received / Sent** — cumulative packet counters (`total_increasing`).
+- **WAN Bytes Received / Sent** — cumulative byte counters (`total_increasing`, `data_size`).
+- **WAN Errors Received / Sent** — cumulative error counters (`total_increasing`, diagnostic).
+- **LAN Ports** — number of LAN ports that are up; attributes carry the full per-port table (`LANEtherTable`) and `LANStats`.
+
+> **Note:** the byte counters are 32-bit on this firmware and clamp at
+> `2147483647` (2³¹−1) instead of wrapping, so `WAN Bytes *` becomes
+> unreliable once the interface has passed ~2 GB since its last reset. The
+> packet and error counters do not have this limitation.
 
 ### DHCP sensors
 - **Name:** `Technicolor CGA DHCP <Key>` (for each key returned by `dhcp()`)

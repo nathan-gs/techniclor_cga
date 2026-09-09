@@ -1,8 +1,10 @@
 import logging
 from datetime import timedelta
 
-from homeassistant.const import CONF_USERNAME, CONF_PASSWORD, CONF_HOST, CONF_SCAN_INTERVAL
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.const import (
+    CONF_USERNAME, CONF_PASSWORD, CONF_HOST, CONF_SCAN_INTERVAL, UnitOfInformation,
+)
+from homeassistant.components.sensor import SensorEntity, SensorStateClass, SensorDeviceClass
 
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.entity import EntityCategory
@@ -117,6 +119,34 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         TechnicolorCGAChannelsSensor(technicolor, hass, config_entry.entry_id, host,
           "DOCSIS Channels", unique_suffix="docsis_channels",
           suggested_object_id="technicolor_docsis_channels"),
+    ])
+
+    # WAN / LAN interface statistics (dig_interface).
+    sensors.extend([
+        TechnicolorCGAWanStatusSensor(technicolor, hass, config_entry.entry_id, host,
+          "WAN Status", unique_suffix="wan_status",
+          suggested_object_id="technicolor_wan_status"),
+        TechnicolorCGAWanCounterSensor(technicolor, hass, config_entry.entry_id, host,
+          "WAN Packets Received", "PacketsReceived", unique_suffix="wan_packets_received",
+          suggested_object_id="technicolor_wan_packets_received"),
+        TechnicolorCGAWanCounterSensor(technicolor, hass, config_entry.entry_id, host,
+          "WAN Packets Sent", "PacketsSent", unique_suffix="wan_packets_sent",
+          suggested_object_id="technicolor_wan_packets_sent"),
+        TechnicolorCGAWanCounterSensor(technicolor, hass, config_entry.entry_id, host,
+          "WAN Bytes Received", "BytesReceived", unique_suffix="wan_bytes_received",
+          suggested_object_id="technicolor_wan_bytes_received", data_size=True),
+        TechnicolorCGAWanCounterSensor(technicolor, hass, config_entry.entry_id, host,
+          "WAN Bytes Sent", "BytesSent", unique_suffix="wan_bytes_sent",
+          suggested_object_id="technicolor_wan_bytes_sent", data_size=True),
+        TechnicolorCGAWanCounterSensor(technicolor, hass, config_entry.entry_id, host,
+          "WAN Errors Received", "ErrorsReceived", unique_suffix="wan_errors_received",
+          suggested_object_id="technicolor_wan_errors_received", diagnostic=True),
+        TechnicolorCGAWanCounterSensor(technicolor, hass, config_entry.entry_id, host,
+          "WAN Errors Sent", "ErrorsSent", unique_suffix="wan_errors_sent",
+          suggested_object_id="technicolor_wan_errors_sent", diagnostic=True),
+        TechnicolorCGALanPortsSensor(technicolor, hass, config_entry.entry_id, host,
+          "LAN Ports", unique_suffix="lan_ports",
+          suggested_object_id="technicolor_lan_ports"),
     ])
 
     async_add_entities(sensors, update_before_add=True)
@@ -531,3 +561,93 @@ class TechnicolorCGAChannelsSensor(TechnicolorCGALevelsSensor):
             "ErrTbl": levels.get("ErrTbl") or [],
         }
 
+
+class TechnicolorCGAInterfacesSensor(TechnicolorCGABaseSensor):
+    """Base for sensors derived from the dig_interface() statistics.
+
+    ``interfaces()`` returns per-interface counters for the WAN uplink
+    (``WANStats``), the physical LAN ports (``LANEtherTable``) and the WiFi
+    radios. The API layer caches the result briefly so the WAN/LAN sensors
+    sharing one update cycle only cause a single request.
+    """
+
+    def __init__(self, technicolor_cga, hass, config_entry_id, host, name, **kwargs):
+        super().__init__(technicolor_cga, hass, config_entry_id, host, name, **kwargs)
+
+    async def async_update(self):
+        try:
+            data = await self.hass.async_add_executor_job(self.technicolor_cga.interfaces)
+            self._apply_interfaces(data or {})
+        except Exception as e:
+            _LOGGER.error("Error updating %s sensor: %s", self.name, e)
+
+    def _apply_interfaces(self, data):
+        raise NotImplementedError
+
+
+class TechnicolorCGAWanStatusSensor(TechnicolorCGAInterfacesSensor):
+    """WAN uplink link state (Up/Down) with link details as attributes."""
+
+    _attr_icon = "mdi:wan"
+
+    def _apply_interfaces(self, data):
+        eth = data.get("WANEthernet") or {}
+        l3 = data.get("WANL3Interface") or {}
+        stats = data.get("WANStats") or {}
+        self._state = eth.get("Status") or l3.get("Status") or "Unknown"
+        self._attributes = {
+            "l3_status": l3.get("Status"),
+            "max_bitrate_mbps": _to_int(eth.get("MaxBitRate")),
+            "duplex": eth.get("DuplexMode"),
+            "last_change_s": _to_int(l3.get("LastChange")),
+            "packets_received": _to_int(stats.get("PacketsReceived")),
+            "packets_sent": _to_int(stats.get("PacketsSent")),
+            "bytes_received": _to_int(stats.get("BytesReceived")),
+            "bytes_sent": _to_int(stats.get("BytesSent")),
+            "errors_received": _to_int(stats.get("ErrorsReceived")),
+            "errors_sent": _to_int(stats.get("ErrorsSent")),
+        }
+
+
+class TechnicolorCGAWanCounterSensor(TechnicolorCGAInterfacesSensor):
+    """A single WANStats counter (packets / bytes / errors).
+
+    All counters are cumulative, so they use ``total_increasing``. Note that
+    the byte counters are 32-bit on this firmware and clamp at 2147483647
+    (2**31-1) rather than wrapping, so ``Bytes*`` becomes unreliable once the
+    interface has passed ~2 GB since the last reset.
+    """
+
+    def __init__(self, technicolor_cga, hass, config_entry_id, host, name, field,
+                 *, data_size=False, diagnostic=False, **kwargs):
+        super().__init__(technicolor_cga, hass, config_entry_id, host, name, **kwargs)
+        self._field = field
+        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        if data_size:
+            self._attr_device_class = SensorDeviceClass.DATA_SIZE
+            self._attr_native_unit_of_measurement = UnitOfInformation.BYTES
+        if diagnostic:
+            self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def _apply_interfaces(self, data):
+        stats = data.get("WANStats") or {}
+        self._state = _to_int(stats.get(self._field))
+
+
+class TechnicolorCGALanPortsSensor(TechnicolorCGAInterfacesSensor):
+    """Number of LAN ports that are up; full per-port table as attributes."""
+
+    _attr_icon = "mdi:ethernet"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def _apply_interfaces(self, data):
+        ports = data.get("LANEtherTable") or []
+        self._state = sum(1 for p in ports if str(p.get("Status", "")).lower() == "up")
+        self._attributes = {
+            "port_count": len(ports),
+            "ports": ports,
+            "LANStats": data.get("LANStats") or {},
+        }
