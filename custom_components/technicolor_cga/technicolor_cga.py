@@ -10,6 +10,12 @@ class TechnicolorCGA:
 
         self.logged = False
 
+        # short-lived cache for the DOCSIS levels() tables so that several
+        # sensors sharing one update cycle only trigger a single HTTP request
+        # (the modem only allows one session at a time).
+        self._levels_cache = None
+        self._levels_ts = 0.0
+
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36"})
         self.session.headers.update({"X-Requested-With": "XMLHttpRequest"})
@@ -96,7 +102,12 @@ class TechnicolorCGA:
         endpoint = self.endpoint("system", options)
         return self.call(endpoint)
 
-    def levels(self):
+    def levels(self, max_age=10):
+        # Reuse a recent result so the several DOCSIS sensors that run in the
+        # same update pass don't each hit the modem separately.
+        if self._levels_cache is not None and (time.time() - self._levels_ts) < max_age:
+            return self._levels_cache
+
         options = [
             "exUSTbl",
             "exDSTbl",
@@ -106,7 +117,10 @@ class TechnicolorCGA:
         ]
 
         endpoint = self.endpoint("modem", options)
-        return self.call(endpoint)
+        data = self.call(endpoint)
+        self._levels_cache = data
+        self._levels_ts = time.time()
+        return data
 
     def dhcp(self):
         options = [

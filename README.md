@@ -4,6 +4,7 @@ This project provides several **sensor entities** for a Technicolor CGA gateway 
 ## Features
 
 - **System status** (e.g., `CMStatus`) including pass-through of additional system attributes
+- **DOCSIS RF sensors**: downstream/upstream power, downstream SNR, and corrected/uncorrectable codeword counters (from the `levels()` tables)
 - **DHCP sensors** for all DHCP keys returned by the gateway
 - **Host list** with the number of currently detected devices (`hostTbl`)
 - **Missing devices / Delta sensor**: shows devices that disappeared or are inactive
@@ -44,6 +45,18 @@ v0.9.1: is installable over HACS custom repo
 - **State:** value of `CMStatus` (or `"Unknown"`)
 - **Attributes:** all other system fields (e.g., `ModelName`, `SoftwareVersion`, etc.).
 - **Device info:** `model`/`sw_version` are set from system data when present.
+
+### DOCSIS RF sensors
+Derived from the modem's `levels()` tables (`DSTbl`/`USTbl`, the OFDM/OFDMA
+`exDSTbl`/`exUSTbl`, and the `ErrTbl` error counters). One shared, briefly
+cached fetch feeds all of them.
+
+- **Downstream Power** — average receive power across all downstream channels (`dBmV`); attributes: `min_dbmv`, `max_dbmv`, `channel_count`, and a per-channel breakdown.
+- **Downstream SNR** — worst-case (minimum) SNR across downstream channels (`dB`); attributes: `min_db`, `max_db`, `avg_db`.
+- **Upstream Power** — average transmit power across upstream channels (`dBmV`); attributes: per-channel breakdown.
+- **Downstream Correcteds** — total corrected codewords (`total_increasing`, diagnostic).
+- **Downstream Uncorrectables** — total uncorrectable codewords (`total_increasing`, diagnostic). The key line-health metric — it should stay flat.
+- **DOCSIS Channels** — number of locked channels; attributes carry the raw `DSTbl`/`USTbl`/`exDSTbl`/`exUSTbl`/`ErrTbl` tables for drill-down.
 
 ### DHCP sensors
 - **Name:** `Technicolor CGA DHCP <Key>` (for each key returned by `dhcp()`)

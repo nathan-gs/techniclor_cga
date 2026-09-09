@@ -2,7 +2,7 @@ import logging
 from datetime import timedelta
 
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD, CONF_HOST, CONF_SCAN_INTERVAL
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorEntity, SensorStateClass
 
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.entity import EntityCategory
@@ -11,6 +11,22 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 DEFAULT_SCAN_SECONDS = 300
+
+
+def _to_float(value):
+    """Extract the leading number from values like '6.4 dBmV' or '38.7 dB'."""
+    if value is None:
+        return None
+    try:
+        return float(str(value).strip().split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _to_int(value):
+    """Parse an integer counter value, tolerating stray whitespace/units."""
+    number = _to_float(value)
+    return int(number) if number is not None else None
 
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
@@ -80,6 +96,28 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     except Exception as err:
         _LOGGER.warning("Failed to fetch DHCP data: %s", err)
 
+    # DOCSIS RF / line-quality sensors (downstream/upstream power, SNR and
+    # corrected/uncorrectable codeword counters).
+    sensors.extend([
+        TechnicolorCGADownstreamPowerSensor(technicolor, hass, config_entry.entry_id, host,
+          "Downstream Power", unique_suffix="downstream_power",
+          suggested_object_id="technicolor_downstream_power"),
+        TechnicolorCGADownstreamSnrSensor(technicolor, hass, config_entry.entry_id, host,
+          "Downstream SNR", unique_suffix="downstream_snr",
+          suggested_object_id="technicolor_downstream_snr"),
+        TechnicolorCGAUpstreamPowerSensor(technicolor, hass, config_entry.entry_id, host,
+          "Upstream Power", unique_suffix="upstream_power",
+          suggested_object_id="technicolor_upstream_power"),
+        TechnicolorCGACorrectedsSensor(technicolor, hass, config_entry.entry_id, host,
+          "Downstream Correcteds", unique_suffix="downstream_correcteds",
+          suggested_object_id="technicolor_downstream_correcteds"),
+        TechnicolorCGAUncorrectablesSensor(technicolor, hass, config_entry.entry_id, host,
+          "Downstream Uncorrectables", unique_suffix="downstream_uncorrectables",
+          suggested_object_id="technicolor_downstream_uncorrectables"),
+        TechnicolorCGAChannelsSensor(technicolor, hass, config_entry.entry_id, host,
+          "DOCSIS Channels", unique_suffix="docsis_channels",
+          suggested_object_id="technicolor_docsis_channels"),
+    ])
 
     async_add_entities(sensors, update_before_add=True)
 
@@ -312,5 +350,184 @@ class TechnicolorCGAHostDeltaSensor(TechnicolorCGABaseSensor):
             _LOGGER.error("Error updating %s sensor: %s", self._attr_name, e)
 
 
+class TechnicolorCGALevelsSensor(TechnicolorCGABaseSensor):
+    """Base for sensors derived from the modem's DOCSIS levels() tables.
 
+    ``levels()`` returns the SC-QAM downstream/upstream tables (``DSTbl`` /
+    ``USTbl``), the OFDM/OFDMA tables (``exDSTbl`` / ``exUSTbl``) and the
+    per-downstream-channel error counters (``ErrTbl``). The API layer caches
+    the result briefly so the sensors sharing one update cycle only cause a
+    single request to the (single-session) modem.
+    """
+
+    def __init__(self, technicolor_cga, hass, config_entry_id, host, name, **kwargs):
+        super().__init__(technicolor_cga, hass, config_entry_id, host, name, **kwargs)
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+
+    @staticmethod
+    def _downstream_rows(levels):
+        return (levels.get("DSTbl") or []) + (levels.get("exDSTbl") or [])
+
+    @staticmethod
+    def _upstream_rows(levels):
+        return (levels.get("USTbl") or []) + (levels.get("exUSTbl") or [])
+
+    async def async_update(self):
+        try:
+            levels = await self.hass.async_add_executor_job(self.technicolor_cga.levels)
+            self._apply_levels(levels or {})
+        except Exception as e:
+            _LOGGER.error("Error updating %s sensor: %s", self.name, e)
+
+    def _apply_levels(self, levels):
+        raise NotImplementedError
+
+
+class TechnicolorCGADownstreamPowerSensor(TechnicolorCGALevelsSensor):
+    """Average downstream receive power across all locked channels (dBmV)."""
+
+    _attr_native_unit_of_measurement = "dBmV"
+    _attr_icon = "mdi:signal"
+
+    def _apply_levels(self, levels):
+        rows = self._downstream_rows(levels)
+        powers = [p for p in (_to_float(r.get("PowerLevel")) for r in rows) if p is not None]
+        self._state = round(sum(powers) / len(powers), 1) if powers else None
+        self._attributes = {
+            "channel_count": len(powers),
+            "min_dbmv": round(min(powers), 1) if powers else None,
+            "max_dbmv": round(max(powers), 1) if powers else None,
+            "channels": [
+                {
+                    "channel_id": r.get("ChannelID"),
+                    "frequency": r.get("Frequency") or r.get("CentralFrequency"),
+                    "power_dbmv": _to_float(r.get("PowerLevel")),
+                    "snr_db": _to_float(r.get("SNRLevel")),
+                    "type": r.get("ChannelType"),
+                    "lock": r.get("LockStatus"),
+                }
+                for r in rows
+            ],
+        }
+
+
+class TechnicolorCGADownstreamSnrSensor(TechnicolorCGALevelsSensor):
+    """Worst-case downstream signal-to-noise ratio across channels (dB)."""
+
+    _attr_native_unit_of_measurement = "dB"
+    _attr_icon = "mdi:waveform"
+
+    def _apply_levels(self, levels):
+        rows = self._downstream_rows(levels)
+        snrs = [s for s in (_to_float(r.get("SNRLevel")) for r in rows) if s is not None]
+        # The worst channel is the one that dictates line quality, so report min.
+        self._state = round(min(snrs), 1) if snrs else None
+        self._attributes = {
+            "channel_count": len(snrs),
+            "min_db": round(min(snrs), 1) if snrs else None,
+            "max_db": round(max(snrs), 1) if snrs else None,
+            "avg_db": round(sum(snrs) / len(snrs), 1) if snrs else None,
+        }
+
+
+class TechnicolorCGAUpstreamPowerSensor(TechnicolorCGALevelsSensor):
+    """Average upstream transmit power across all locked channels (dBmV)."""
+
+    _attr_native_unit_of_measurement = "dBmV"
+    _attr_icon = "mdi:signal"
+
+    def _apply_levels(self, levels):
+        rows = self._upstream_rows(levels)
+        powers = [p for p in (_to_float(r.get("PowerLevel")) for r in rows) if p is not None]
+        self._state = round(sum(powers) / len(powers), 1) if powers else None
+        self._attributes = {
+            "channel_count": len(powers),
+            "min_dbmv": round(min(powers), 1) if powers else None,
+            "max_dbmv": round(max(powers), 1) if powers else None,
+            "channels": [
+                {
+                    "channel_id": r.get("ChannelID"),
+                    "frequency": r.get("Frequency") or r.get("CentralFrequency"),
+                    "power_dbmv": _to_float(r.get("PowerLevel")),
+                    "type": r.get("ChannelType"),
+                    "lock": r.get("LockStatus"),
+                }
+                for r in rows
+            ],
+        }
+
+
+class TechnicolorCGACorrectedsSensor(TechnicolorCGALevelsSensor):
+    """Total corrected codewords across downstream channels (ErrTbl)."""
+
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_icon = "mdi:alert-circle-check-outline"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def _apply_levels(self, levels):
+        rows = levels.get("ErrTbl") or []
+        values = [c for c in (_to_int(r.get("Correcteds")) for r in rows) if c is not None]
+        self._state = sum(values) if values else None
+        self._attributes = {
+            "channel_count": len(rows),
+            "per_channel": [_to_int(r.get("Correcteds")) for r in rows],
+        }
+
+
+class TechnicolorCGAUncorrectablesSensor(TechnicolorCGALevelsSensor):
+    """Total uncorrectable codewords across downstream channels (ErrTbl).
+
+    This is the key line-health metric: it should stay flat. A rising value
+    means the downstream signal is degraded beyond FEC's ability to recover.
+    """
+
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_icon = "mdi:alert-circle-outline"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def _apply_levels(self, levels):
+        rows = levels.get("ErrTbl") or []
+        values = [u for u in (_to_int(r.get("Uncorrectables")) for r in rows) if u is not None]
+        self._state = sum(values) if values else None
+        self._attributes = {
+            "channel_count": len(rows),
+            "per_channel": [_to_int(r.get("Uncorrectables")) for r in rows],
+        }
+
+
+class TechnicolorCGAChannelsSensor(TechnicolorCGALevelsSensor):
+    """Number of locked DOCSIS channels; carries the raw tables as attributes."""
+
+    _attr_icon = "mdi:television-guide"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._attr_state_class = None
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @staticmethod
+    def _locked(rows):
+        return sum(1 for r in rows if str(r.get("LockStatus", "")).lower() == "locked")
+
+    def _apply_levels(self, levels):
+        ds = self._downstream_rows(levels)
+        us = self._upstream_rows(levels)
+        self._state = self._locked(ds) + self._locked(us)
+        self._attributes = {
+            "downstream_locked": self._locked(ds),
+            "downstream_total": len(ds),
+            "upstream_locked": self._locked(us),
+            "upstream_total": len(us),
+            "DSTbl": levels.get("DSTbl") or [],
+            "USTbl": levels.get("USTbl") or [],
+            "exDSTbl": levels.get("exDSTbl") or [],
+            "exUSTbl": levels.get("exUSTbl") or [],
+            "ErrTbl": levels.get("ErrTbl") or [],
+        }
 
