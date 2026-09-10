@@ -3,6 +3,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD, CONF_HOST
+from homeassistant.exceptions import ConfigEntryNotReady
 
 from .const import DOMAIN
 from .technicolor_cga import TechnicolorCGA
@@ -28,8 +29,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         api = TechnicolorCGA(username, password, router)
         await hass.async_add_executor_job(api.login)
     except Exception as err:
-        _LOGGER.error("Failed to log in to Technicolor CGA: %s", err)
-        return False
+        # The modem allows a single session and can briefly refuse a login
+        # (e.g. right after a reboot, or while another session is being torn
+        # down), which surfaces here as a missing 'salt'/'data' key. Treat it
+        # as temporary so Home Assistant retries with backoff instead of
+        # leaving the integration dead until a manual reload.
+        raise ConfigEntryNotReady(
+            f"Could not log in to Technicolor CGA at {router}: {err}"
+        ) from err
 
     # ✅ Platz für api + später unsub (Interval-Listener)
     hass.data[DOMAIN][entry.entry_id] = {"api": api, "unsub": None}
