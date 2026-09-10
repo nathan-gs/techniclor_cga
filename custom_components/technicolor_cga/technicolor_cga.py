@@ -51,29 +51,40 @@ class TechnicolorCGA:
 
         return hashlib.pbkdf2_hmac('sha256', bpass, bsalt, 1000).hex()[:32]
 
-    def login(self):
+    def _request_salt(self, logout):
         data = {
             "username": self.username,
-            "password": "seeksalthash"
+            "password": "seeksalthash",
+            "logout": "true" if logout else "false",
         }
-
         endpoint = self.endpoint("session", ["login"])
-        request = self.session.post(endpoint, data=data)
-        response = request.json()
+        return self.session.post(endpoint, data=data).json()
 
-        challenge = self.challenge(self.password, response['salt'])
-        challenge = self.challenge(challenge, response['saltwebui'])
+    def login(self):
+        # Seed a session cookie (PHPSESSID) first: the modem's own web UI does
+        # a GET on session/menu before logging in. Without it the salt request
+        # comes back as MSG_LOGIN_150 ("already logged in") with no salt.
+        self.session.get(self.endpoint("session", ["menu"]))
+
+        response = self._request_salt(logout=False)
+        if "salt" not in response:
+            # A previous session is still held (single-session device). Ask the
+            # modem to drop it and hand us the salt, like the web UI does when
+            # it hits MSG_LOGIN_150.
+            response = self._request_salt(logout=True)
+
+        challenge = self.challenge(self.password, response["salt"])
+        challenge = self.challenge(challenge, response["saltwebui"])
 
         data = {
-            "username": "user",
-            "password": challenge
+            "username": self.username,
+            "password": challenge,
         }
 
         endpoint = self.endpoint("session", ["login"])
-        request = self.session.post(endpoint, data=data)
-        response = request.json()
+        response = self.session.post(endpoint, data=data).json()
 
-        if response['error'] == 'ok':
+        if response.get("error") == "ok":
             self.session.headers.update({'X-CSRF-TOKEN': self.session.cookies['auth']})
 
             endpoint = self.endpoint("session", ["menu"])
@@ -83,7 +94,7 @@ class TechnicolorCGA:
 
             return True
 
-        raise RuntimeError("invalid credentials")
+        raise RuntimeError(f"login failed: {response.get('message', response)}")
 
     def system(self):
         options = [
