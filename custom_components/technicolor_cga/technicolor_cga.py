@@ -32,8 +32,17 @@ class TechnicolorCGA:
         return f"{self.server}/api/v1/{target}/{opts}?_={now}"
 
     def call(self, endpoint):
-        request = self.session.get(endpoint)
-        response = request.json()
+        response = self.session.get(endpoint).json()
+
+        # The modem drops idle sessions (and only allows one at a time), after
+        # which requests come back as {"error": "error", "message":
+        # "Unauthorized!"} with no "data" key. Re-authenticate once and retry
+        # so the integration recovers on its own instead of going stale until
+        # Home Assistant is restarted.
+        if "data" not in response:
+            self.login()
+            response = self.session.get(endpoint).json()
+
         return response["data"]
 
     def challenge(self, password, salt):
