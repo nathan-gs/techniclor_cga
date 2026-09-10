@@ -390,9 +390,11 @@ class TechnicolorCGALevelsSensor(TechnicolorCGABaseSensor):
     single request to the (single-session) modem.
     """
 
-    def __init__(self, technicolor_cga, hass, config_entry_id, host, name, **kwargs):
-        super().__init__(technicolor_cga, hass, config_entry_id, host, name, **kwargs)
-        self._attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    @staticmethod
+    def _is_locked(row):
+        return str(row.get("LockStatus", "")).strip().lower() == "locked"
 
     @staticmethod
     def _downstream_rows(levels):
@@ -405,8 +407,12 @@ class TechnicolorCGALevelsSensor(TechnicolorCGABaseSensor):
     async def async_update(self):
         try:
             levels = await self.hass.async_add_executor_job(self.technicolor_cga.levels)
-            self._apply_levels(levels or {})
+            if not isinstance(levels, dict) or not levels:
+                raise ValueError("Missing or invalid DOCSIS data")
+            self._apply_levels(levels)
+            self._attr_available = True
         except Exception as e:
+            self._attr_available = False
             _LOGGER.error("Error updating %s sensor: %s", self.name, e)
 
     def _apply_levels(self, levels):
@@ -421,7 +427,12 @@ class TechnicolorCGADownstreamPowerSensor(TechnicolorCGALevelsSensor):
 
     def _apply_levels(self, levels):
         rows = self._downstream_rows(levels)
-        powers = [p for p in (_to_float(r.get("PowerLevel")) for r in rows) if p is not None]
+        powers = [
+            value
+            for row in rows
+            if self._is_locked(row)
+            if (value := _to_float(row.get("PowerLevel"))) is not None
+        ]
         self._state = round(sum(powers) / len(powers), 1) if powers else None
         self._attributes = {
             "channel_count": len(powers),
@@ -449,7 +460,12 @@ class TechnicolorCGADownstreamSnrSensor(TechnicolorCGALevelsSensor):
 
     def _apply_levels(self, levels):
         rows = self._downstream_rows(levels)
-        snrs = [s for s in (_to_float(r.get("SNRLevel")) for r in rows) if s is not None]
+        snrs = [
+            value
+            for row in rows
+            if self._is_locked(row)
+            if (value := _to_float(row.get("SNRLevel"))) is not None
+        ]
         # The worst channel is the one that dictates line quality, so report min.
         self._state = round(min(snrs), 1) if snrs else None
         self._attributes = {
@@ -468,7 +484,12 @@ class TechnicolorCGAUpstreamPowerSensor(TechnicolorCGALevelsSensor):
 
     def _apply_levels(self, levels):
         rows = self._upstream_rows(levels)
-        powers = [p for p in (_to_float(r.get("PowerLevel")) for r in rows) if p is not None]
+        powers = [
+            value
+            for row in rows
+            if self._is_locked(row)
+            if (value := _to_float(row.get("PowerLevel"))) is not None
+        ]
         self._state = round(sum(powers) / len(powers), 1) if powers else None
         self._attributes = {
             "channel_count": len(powers),
@@ -577,8 +598,12 @@ class TechnicolorCGAInterfacesSensor(TechnicolorCGABaseSensor):
     async def async_update(self):
         try:
             data = await self.hass.async_add_executor_job(self.technicolor_cga.interfaces)
-            self._apply_interfaces(data or {})
+            if not isinstance(data, dict) or not data:
+                raise ValueError("Missing or invalid interface data")
+            self._apply_interfaces(data)
+            self._attr_available = True
         except Exception as e:
+            self._attr_available = False
             _LOGGER.error("Error updating %s sensor: %s", self.name, e)
 
     def _apply_interfaces(self, data):
